@@ -1338,6 +1338,8 @@ cdef class Model:
         self._next_params_index = 0
         self._dummy_param_counter = 0
 
+        self.has_delay = False #Does the Model contain any delay reactions? Updated in _add_reaction.
+
         self.species2index = {}
         self.params2index = {}
         self.propensities = []
@@ -1345,6 +1347,7 @@ cdef class Model:
         self.repeat_rules = []
         self.params_values = np.array([])
         self.species_values = np.array([])
+        self.txt_dict = {'reactions':"", 'rules':""} # A dictionary to store XML txt to write bioscrape xml
 
         #These must be updated later
         self.update_array = None
@@ -1443,7 +1446,7 @@ cdef class Model:
         :return: None
         """
         self.initialized = False
-        if species not in self.species2index:
+        if species not in self.species2index and species is not None:
             self.species2index[species] = self._next_species_index
             self._next_species_index += 1
             self.species_values = np.concatenate((self.species_values, np.array([-1])))
@@ -1482,6 +1485,8 @@ cdef class Model:
 
         if delay_object == None:
            delay_object = NoDelay()
+        elif not type(delay_object) == type(NoDelay()):
+            self.has_delay = True
 
         species_names, param_names = delay_object.get_species_and_parameters(delay_param_dict)
 
@@ -1616,7 +1621,8 @@ cdef class Model:
         if 'species' not in propensity_param_dict and propensity_type == "massaction":
                 reactant_string = ""
                 for s in reactants:
-                    reactant_string += s+"*"
+                    if s is not None:
+                        reactant_string += s+"*"
                 propensity_param_dict['species'] = reactant_string[:len(reactant_string)-1]
 
         prop_object = self.create_propensity(propensity_type, propensity_param_dict, print_out = input_printout)
@@ -1632,6 +1638,9 @@ cdef class Model:
                 if r not in delay_reaction_update_dict:
                     delay_reaction_update_dict[r] = 0
                 delay_reaction_update_dict[r]  -= 1
+        else:
+            delay_reactants = []
+
         if delay_products != None:
             for p in delay_products:
                 # if the species hasn't been seen add it to the index
@@ -1640,6 +1649,8 @@ cdef class Model:
                 if p not in delay_reaction_update_dict:
                     delay_reaction_update_dict[p] = 0
                 delay_reaction_update_dict[p]  += 1
+        else:
+            delay_products = []
 
         
         if delay_type == 'none' or delay_type == None:
@@ -1659,8 +1670,57 @@ cdef class Model:
         else:
             raise SyntaxError('Unknown delay type: ' + delay_type)
         delay_param_dict.pop('type',None)
+
         self._add_reaction(reaction_update_dict, prop_object, propensity_param_dict, delay_reaction_update_dict, delay_object, delay_param_dict)
-        
+        self.write_rxn_txt(reactants, products, propensity_type, propensity_param_dict, delay_type, delay_reactants, delay_products, delay_param_dict)
+    
+    def write_rxn_txt(self, reactants, products, propensity_type, propensity_param_dict, delay_type, delay_reactants, delay_products, delay_param_dict):
+        #Write bioscrape XML and save it to the xml dictionary
+        rxn_txt = '<reaction text= "'
+        for r in reactants:
+            if r is not None:
+                rxn_txt += r +" + "
+        if len(reactants)>0:
+            rxn_txt = rxn_txt[:-2]
+        rxn_txt += "-- "
+        for p in products:
+            if p is not None:
+                rxn_txt += p+" + "
+        if len(products)>0:
+            rxn_txt = rxn_txt[:-2]
+        rxn_txt +='"'
+        if len(delay_reactants) > 0 or len(delay_products)> 0:
+            rxn_txt += ' after= "'
+            if len(delay_reactants) > 0:
+                for r in delay_reactants:
+                    if r is not None:
+                        rxn_txt += r +" + "
+                if len(delay_reactants) > 0:
+                    rxn_txt = rxn_txt[:-2]
+            rxn_txt += "-- "
+            if len(delay_products)> 0:
+                for p in delay_products:
+                    if p is not None:
+                        rxn_txt += p+" + "
+                if len(delay_products)>0:
+                    rxn_txt = rxn_txt[:-2]
+                rxn_txt +='"'
+        rxn_txt += '>\n\t<propensity type="'
+        rxn_txt += propensity_type+'" '
+        for k in propensity_param_dict:
+            rxn_txt+=k+'="'+propensity_param_dict[k]+'" '
+        rxn_txt += '/>\n\t<delay type="'
+        if delay_type == None:
+            rxn_txt += 'none" />'
+        else:
+            rxn_txt += delay_type+'" '
+            for k in delay_param_dict:
+                rxn_txt += 'k="'+delay_param_dict[k]+'" '
+            rxn_txt+='/>'
+        rxn_txt += '\n</reaction>\n'
+        self.txt_dict['reactions']+=rxn_txt
+
+
 
     def _add_param(self, param_name):
         """
@@ -1715,6 +1775,16 @@ cdef class Model:
         else:
             raise SyntaxError('Invalid Rule Frequency: ' + str(rule_frequency))
 
+        self.write_rule_txt(rule_type, rule_attributes, rule_frequency)
+
+    def write_rule_txt(self, rule_type, rule_attributes, rule_frequency):
+        rule_txt = '<rule type="'+rule_type+'" frequency="'+rule_frequency+'" '
+        for k in rule_attributes:
+            rule_txt += k+'="'+rule_attributes[k]+'" '
+
+        rule_txt += " />\n"
+        self.txt_dict["rules"]+=rule_txt
+
     #Sets the value of a parameter in the model
     def set_parameter(self, param_name, param_value):
         if param_name not in self.params2index:
@@ -1723,6 +1793,10 @@ cdef class Model:
 
         param_index = self.params2index[param_name]
         self.params_values[param_index] = param_value
+
+    def create_parameter(self, param_name, param_value):
+        self._add_param(param_name)
+        self.set_parameter(param_name, param_value)
 
     #Checks that all parameters have values
     def check_parameters(self):
@@ -1929,6 +2003,14 @@ cdef class Model:
     def get_parameter_values(self):
         return self.params_values
 
+    def get_parameter_dictionary(self):
+        param_dict = {}
+        keys = self.get_params()
+        values = self.get_parameter_values()
+        for (key, value) in zip(keys, values):
+            param_dict[key] = value
+        return param_dict
+
     def get_species(self):
         """
         Get the set of species names.
@@ -1936,6 +2018,17 @@ cdef class Model:
         """
 
         return self.species2index.keys()
+
+    def get_species_dictionary(self):
+        """
+        Get a dictionary {"species":value}
+        """
+        A = self.get_species_array()
+        species_dict = {}
+        for s in self.species2index:
+            species_dict[s] = A[self.species2index[s]] 
+        return species_dict
+        # return {(s, A[self.species2index[s]]) for s in self.species2index}
 
     def get_number_of_species(self):
         return len(self.species2index.keys())
@@ -1992,6 +2085,9 @@ cdef class Model:
         :return: (list) List of the delay objects for each reaction.
         """
         return self.delays
+
+    def get_reactions(self):
+        return self.reaction_list
 
     cdef np.ndarray get_species_values(self):
         """
@@ -2068,6 +2164,33 @@ cdef class Model:
 
     def parse_general_expression(self, instring):
         return parse_expression(instring,self.species2index,self.params2index)
+
+
+    def write_bioscrape_xml(self, file_name):
+        #Writes Bioscrape XML
+        txt = "<model>\n"
+        species = self.get_species_list()
+
+        #Write the Species
+        for s in species:
+            v = self.get_species_value(s)
+            txt+='<species name="'+s+'" value="'+str(v)+'" />\n'
+        txt+='\n'
+        parameters = self.get_param_list()
+        for p in parameters:
+            v = self.get_param_value(p)
+            txt+='<parameter name="'+p+'" value="'+str(v)+'" />\n'
+        txt+='\n'
+        txt += self.txt_dict["reactions"]
+        txt+='\n'
+        txt += self.txt_dict["rules"]
+        txt += "</model>" 
+        
+        f = open(file_name, 'w')
+        f.write(txt)
+        f.close()
+
+        
 
     ##################################################                ####################################################
     ######################################              SBML CONVERSION                     ##############################
@@ -2174,6 +2297,7 @@ cdef class Model:
         return document
 
     #Processes an SBML file so that it no longer contains multiplicity in local variable names
+    # TODO : Need to fix this, doesn't work right now.
     def process_sbml(self, sbml_file):
         try:
             import libsbml
@@ -2352,6 +2476,10 @@ cdef class Model:
         out += '</model>\n'
         return out
 
+
+
+
+
 def read_model_from_sbml(sbml_file):
     #model_string = convert_sbml_to_string(sbml_file)
     #import io
@@ -2394,6 +2522,23 @@ cdef class Schnitz:
 
     def py_get_volume(self):
         return self.volume
+
+    def py_get_dataframe(self, Model = None):
+        try:
+            import pandas
+            if Model == None:
+                warnings.warn("No Model passed into py_get_dataframe. No species names will be attached to the data frame.")
+                df = pandas.DataFrame(data = self.py_get_data())
+            else:
+                columns = Model.get_species_list()
+                df = pandas.DataFrame(data = self.py_get_data(), columns = columns)
+            df['time'] = self.time
+            df['volume'] = self.volume
+            return df
+
+        except ModuleNotFoundError:
+            warnings.warn("py_get_dataframe requires the pandas Module to return a Pandas Dataframe object. Numpy array being returned instead.")
+            return self.py_get_result()
 
     def py_get_parent(self):
         return self.parent
